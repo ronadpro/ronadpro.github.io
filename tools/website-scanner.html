@@ -16,10 +16,10 @@
     --border-soft:#182430;
     --text:#dce6ec;
     --muted:#7c93a3;
-    --dim:#516472;
-    --accent:#ffb454;
+    --dim:#4b6070;
+    --accent:#45d9c0;
     --accent-dim:#1f4a44;
-    --warn:#e4994f;
+    --warn:#f2a65a;
     --ok:#6fcf97;
     --err:#ef6461;
     --mono:'IBM Plex Mono', ui-monospace, monospace;
@@ -146,6 +146,7 @@
       <h1>Website Scanner</h1>
       <div class="sub">Point it at a domain to pull DNS &amp; hosting data, fingerprint WordPress (or another CMS) and its stack, spot analytics trackers, and check SSL / security headers — plus follow redirects to a different domain.</div>
     </div>
+    <div class="scope-note"><b>Scope:</b> runs entirely in your browser, no backend. Some fields a server-side scanner can read (raw response headers, TLS certificate data) are structurally invisible to browser JS — those are labeled, not faked. See footer.</div>
   </header>
 
   <div class="console">
@@ -194,7 +195,9 @@
     <div class="panel-body" id="body-ssl"></div>
   </section>
 
-
+  <footer>
+    <b>What's real vs. what's structurally blocked:</b> DNS records, page title/meta/generator tag, robots.txt / sitemap.xml / readme.html / xmlrpc.php / wp-json presence, plugin &amp; theme fingerprints, and analytics IDs are all read directly from live requests this page makes — that data is genuine. Three things a browser cannot do, by design, regardless of which proxy or API is used: (1) read another site's <b>raw response headers</b> (Server, X-Powered-By, security headers) unless that site explicitly opts in via <b>Access-Control-Expose-Headers</b> — most don't; (2) inspect a <b>TLS certificate's</b> issuer or expiry — that lives below the JavaScript layer entirely; (3) measure true server response time — timings here include proxy overhead. Fields affected by this are marked <i>"not exposed"</i> rather than guessed. A PHP (or any server-side) version can read all of this directly with curl/openssl, which is exactly why it showed more — replicating that fully from a static GitHub Pages site would need a small serverless function (e.g. a Cloudflare Worker) doing the header/cert fetch and returning JSON to this page. Ask if you'd like that added as a companion piece. Fetches route through Google's DNS-over-HTTPS, ipwho.is, and api.allorigins.win (a public read-only proxy) to work around cross-origin restrictions — the proxy can rate-limit or be blocked by some targets.
+  </footer>
 
 </div>
 
@@ -252,33 +255,72 @@
     } finally { clearTimeout(t); }
   }
 
-  // Fetch an arbitrary path on the target host, direct-CORS first, proxy fallback.
-  // Returns {ok, status, text, headers, direct, finalUrl, timeMs}
+  // Fetch an arbitrary path on the target host. Tries a direct CORS request first,
+  // then falls through a chain of public read-only proxies, since any single free
+  // proxy can be down, rate-limited, or blocked by a given target at any moment.
+  // Returns {ok, status, text, headers, direct, method, finalUrl, timeMs, error}
   async function proxyFetch(host, path){
     const targetUrl = `https://${host}${path}`;
     const start = performance.now();
+    const attempts = [];
+    const elapsed = () => Math.round(performance.now() - start);
+
+    // 1. Direct cross-origin fetch — works only if the target explicitly allows CORS.
     try{
       const ctrl = new AbortController();
       const t = setTimeout(()=>ctrl.abort(), 7000);
       const res = await fetch(targetUrl, {mode:'cors', redirect:'follow', signal: ctrl.signal});
       clearTimeout(t);
       const text = await res.text();
-      return { ok:true, direct:true, status:res.status, text, headers:res.headers, finalUrl:res.url || targetUrl, timeMs: Math.round(performance.now()-start) };
-    } catch(e){ /* fall through */ }
+      return { ok:true, direct:true, method:'direct', status:res.status, text, headers:res.headers, finalUrl:res.url || targetUrl, timeMs: elapsed() };
+    } catch(e){ attempts.push('direct: ' + (e.message || 'failed')); }
 
+    // 2. allorigins.win — JSON-wrapped response, includes upstream status + final URL.
     try{
       const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-      const data = await fetchJSON(proxyUrl, 12000);
-      if(!data || typeof data.contents !== 'string') return {ok:false, direct:false, error:'empty-response'};
-      return {
-        ok:true, direct:false,
-        status: data.status ? data.status.http_code : null,
-        text: data.contents,
-        headers: null,
-        finalUrl: (data.status && data.status.url) ? data.status.url : targetUrl,
-        timeMs: Math.round(performance.now()-start)
-      };
-    } catch(e){ return {ok:false, direct:false, error: e.message || 'fetch-failed'}; }
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), 12000);
+      const res = await fetch(proxyUrl, {signal: ctrl.signal});
+      clearTimeout(t);
+      if(!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if(data && typeof data.contents === 'string'){
+        return {
+          ok:true, direct:false, method:'allorigins',
+          status: data.status ? data.status.http_code : null,
+          text: data.contents, headers:null,
+          finalUrl: (data.status && data.status.url) ? data.status.url : targetUrl,
+          timeMs: elapsed()
+        };
+      }
+      throw new Error('no contents field');
+    } catch(e){ attempts.push('allorigins: ' + (e.message || 'failed')); }
+
+    // 3. codetabs — raw passthrough (no JSON wrapper), 5 req/s rate limit.
+    try{
+      const proxyUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), 12000);
+      const res = await fetch(proxyUrl, {signal: ctrl.signal});
+      clearTimeout(t);
+      const text = await res.text();
+      if(!text) throw new Error('empty body');
+      return { ok:true, direct:false, method:'codetabs', status: res.status, text, headers:null, finalUrl: targetUrl, timeMs: elapsed() };
+    } catch(e){ attempts.push('codetabs: ' + (e.message || 'failed')); }
+
+    // 4. cors.lol — raw passthrough, last resort.
+    try{
+      const proxyUrl = `https://api.cors.lol/url=${targetUrl}`;
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), 12000);
+      const res = await fetch(proxyUrl, {signal: ctrl.signal});
+      clearTimeout(t);
+      const text = await res.text();
+      if(!text) throw new Error('empty body');
+      return { ok:true, direct:false, method:'cors.lol', status: res.status, text, headers:null, finalUrl: targetUrl, timeMs: elapsed() };
+    } catch(e){ attempts.push('cors.lol: ' + (e.message || 'failed')); }
+
+    return { ok:false, direct:false, method:null, error: attempts.join(' — '), timeMs: elapsed() };
   }
 
   async function dohQuery(host, type){
@@ -398,7 +440,8 @@
     const body = $('body-overview');
     if(!home.ok){
       setBadge('badge-overview','Unreachable','err');
-      body.innerHTML = `<div class="empty-msg">Could not fetch the homepage (network issue, proxy rate limit, or the target is blocking automated requests). Try again shortly.</div>`;
+      body.innerHTML = `<div class="empty-msg">Could not fetch the homepage through any available method. Try again shortly — free proxies rate-limit heavily.</div>
+        <div class="note"><b>Diagnostic:</b> ${esc(home.error || 'unknown error')}</div>`;
       return;
     }
     setBadge('badge-overview', home.status ? ('HTTP ' + home.status) : 'Reached', (home.status && home.status >= 400) ? 'warn' : 'ok');
@@ -511,7 +554,8 @@
 
     if(!home.ok){
       setBadge('badge-cms','No content','err');
-      body.innerHTML = `<div class="empty-msg">Couldn't retrieve page source. Try again shortly.</div>`;
+      body.innerHTML = `<div class="empty-msg">Couldn't retrieve page source. Try again shortly.</div>
+        <div class="note"><b>Diagnostic:</b> ${esc(home.error || 'unknown error')}</div>`;
       return;
     }
     const html = home.text || '';
@@ -672,7 +716,7 @@
     out += row('SSL Enabled', httpsOk ? 'Yes' : 'No / unreachable', httpsOk ? 'ok' : '');
     out += row('Certificate Issuer', na('TLS certificate data is invisible to browser JS entirely — use SSL Labs for this'));
     out += row('Certificate Expiry', na('Same reason as above'));
-    out += row('Fetch Method', home.direct ? 'Direct (target allows CORS)' : 'Via proxy (direct cross-origin blocked)');
+    out += row('Fetch Method', home.direct ? 'Direct (target allows CORS)' : `Via proxy: ${esc(home.method || 'unknown')}`);
 
     out += `<div class="subhead">Security Response Headers</div>`;
     if(home.direct && home.headers){
