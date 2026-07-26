@@ -30,3 +30,30 @@
   `:""}
   <p class="muted">Source: ${esc(e.source)}${e.date?" · "+esc(new Date(e.date).toLocaleString()):""}</p>
   <a class="btn primary" href="${esc(e.link)}" target="_blank" rel="noopener noreferrer">Open original advisory ↗</a>`,$("#modal").classList.add("open"))}async function load(){$("#feedStatus").textContent="Refreshing…";const e=await Promise.allSettled(FEEDS.map(getFeed));let s=[OFFICIAL_CORE_ALERT];e.forEach((e,t)=>{setHealth(FEEDS[t].name,"fulfilled"===e.status),"fulfilled"===e.status&&s.push(...e.value)});const t=new Set;state.items=s.filter(e=>{e=e.link||e.title;return!t.has(e)&&(t.add(e),!0)}).sort((e,t)=>new Date(t.date)-new Date(e.date)),$("#updated").textContent=(new Date).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),$("#feedStatus").textContent=`${e.filter(e=>"fulfilled"===e.status).length}/${FEEDS.length} RSS feeds online`,render()}$("#urgentDetails").onclick=()=>details(OFFICIAL_CORE_ALERT.id),document.querySelectorAll(".filter").forEach(e=>e.onclick=()=>{document.querySelectorAll(".filter").forEach(e=>e.classList.remove("active")),e.classList.add("active"),state.filter=e.dataset.filter,render()}),$("#search").oninput=e=>{state.query=e.target.value,render()},$("#severity").onchange=e=>{state.severity=e.target.value,render()},$("#source").onchange=e=>{state.source=e.target.value,render()},$("#refresh").onclick=load,$("#close").onclick=()=>$("#modal").classList.remove("open"),$("#modal").onclick=e=>{"modal"===e.target.id&&$("#modal").classList.remove("open")},$("#theme").onclick=()=>{var e="dark"===document.documentElement.dataset.theme?"light":"dark";document.documentElement.dataset.theme=e,localStorage.setItem("ronad-theme",e)};const saved=localStorage.getItem("ronad-theme");saved&&(document.documentElement.dataset.theme=saved),sourceOptions(),load(),setInterval(load,9e5)</script>
+
+  <script>
+    (function(){
+  "use strict";
+
+  // Block right-click / long-press context menu
+  document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+
+  // Block common "view source" / "inspect" / "save page" shortcuts
+  document.addEventListener('keydown', function(e){
+    var key = e.key ? e.key.toUpperCase() : '';
+    var blockCombo =
+      key === 'F12' ||                                            // DevTools
+      ((e.ctrlKey || e.metaKey) && e.shiftKey && (key === 'I' || key === 'J' || key === 'C')) || // DevTools panels
+      ((e.ctrlKey || e.metaKey) && key === 'U') ||                 // View source
+      ((e.ctrlKey || e.metaKey) && key === 'S');                   // Save page
+
+    if(blockCombo){ e.preventDefault(); }
+  });
+
+  // Block text selection outside form fields (inputs/textarea remain selectable)
+  document.addEventListener('selectstart', function(e){
+    var tag = e.target.tagName;
+    if(tag !== 'INPUT' && tag !== 'TEXTAREA'){ e.preventDefault(); }
+  });
+})();
+  </script>
